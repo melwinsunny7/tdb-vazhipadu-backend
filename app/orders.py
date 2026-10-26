@@ -1,3 +1,4 @@
+import sqlite3
 from decimal import Decimal
 from datetime import date
 
@@ -106,17 +107,30 @@ def search_orders(
 def create_order(order: OrderCreate) -> OrderResponse:
 	connection = get_connection()
 	try:
-		with connection:
+		try:
+			connection.execute("BEGIN IMMEDIATE")
+			temple = connection.execute(
+				"SELECT name FROM temples WHERE temple_id = ?", (order.temple_id,)
+			).fetchone()
+			if temple is None:
+				raise AppError("TEMPLE_NOT_FOUND", "The selected temple does not exist.", 404)
+			temple_name = temple["name"]
 			priced_items = []
 			total_paise = 0
+			requested_quantities: dict[int, int] = {}
 			for item in order.items:
+				requested_quantities[item.offering_id] = (
+					requested_quantities.get(item.offering_id, 0) + item.quantity
+				)
 				offering = connection.execute(
 					"""SELECT offerings.offering_id, offerings.name,
 					          offerings.price_paise, offerings.active,
-					          temple_offerings.active AS temple_active
+					          temple_offerings.active AS temple_active,
+					          temples.name AS temple_name
 				   FROM offerings
 				   JOIN temple_offerings
 				     ON temple_offerings.offering_id = offerings.offering_id
+			   JOIN temples ON temples.temple_id = temple_offerings.temple_id
 				   WHERE offerings.offering_id = ? AND temple_offerings.temple_id = ?""",
 					(item.offering_id, order.temple_id),
 				).fetchone()
@@ -135,6 +149,37 @@ def create_order(order: OrderCreate) -> OrderResponse:
 				unit_price_paise = offering["price_paise"]
 				total_paise += unit_price_paise * item.quantity
 				priced_items.append((item, offering, unit_price_paise))
+
+			for offering_id, requested_quantity in requested_quantities.items():
+				mapping = connection.execute(
+					"""SELECT daily_limit FROM temple_offerings
+					   WHERE temple_id = ? AND offering_id = ?""",
+					(order.temple_id, offering_id),
+				).fetchone()
+				if mapping is None:
+					raise AppError(
+						"OFFERING_NOT_MAPPED",
+						f"Offering {offering_id} is not mapped to this temple.",
+						status_code=422,
+					)
+				daily_limit = mapping["daily_limit"]
+				if daily_limit is None:
+					continue
+				booked_quantity = connection.execute(
+					"""SELECT COALESCE(SUM(order_items.quantity), 0)
+					   FROM orders
+					   JOIN order_items ON order_items.order_id = orders.order_id
+					   WHERE orders.temple_id = ?
+					     AND orders.booking_date = ?
+					     AND order_items.offering_id = ?""",
+					(order.temple_id, order.booking_date.isoformat(), offering_id),
+				).fetchone()[0]
+				if booked_quantity + requested_quantity > daily_limit:
+					raise AppError(
+						"DAILY_LIMIT_EXCEEDED",
+							f"The daily limit for {offering['name']} at {temple_name} has been exceeded for {order.booking_date.isoformat()}.",
+						status_code=409,
+					)
 
 			cursor = connection.execute(
 				"""INSERT INTO orders
@@ -174,7 +219,7 @@ def create_order(order: OrderCreate) -> OrderResponse:
 					)
 				)
 
-			return OrderResponse(
+			response = OrderResponse(
 				id=order_id,
 				temple_id=order.temple_id,
 				devotee_name=order.devotee_name,
@@ -185,6 +230,23 @@ def create_order(order: OrderCreate) -> OrderResponse:
 				items=response_items,
 				total=Decimal(total_paise) / 100,
 			)
+			connection.commit()
+			return response
+		except AppError:
+			connection.rollback()
+			raise
+		except sqlite3.OperationalError as error:
+			connection.rollback()
+			if "locked" in str(error).lower() or "busy" in str(error).lower():
+				raise AppError(
+					"DATABASE_BUSY",
+					"Booking is temporarily busy. Please retry the request.",
+					status_code=503,
+				) from error
+			raise
+		except Exception:
+			connection.rollback()
+			raise
 	finally:
 		connection.close()
 
