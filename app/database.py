@@ -35,7 +35,7 @@ SCHEMA_STATEMENTS = (
         temple_id INTEGER NOT NULL,
         offering_id INTEGER NOT NULL,
         active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-        daily_limit INTEGER CHECK (daily_limit IS NULL OR daily_limit > 0),
+        daily_limit INTEGER CHECK (daily_limit IS NULL OR daily_limit >= 0),
         PRIMARY KEY (temple_id, offering_id),
         FOREIGN KEY (temple_id) REFERENCES temples(temple_id),
         FOREIGN KEY (offering_id) REFERENCES offerings(offering_id)
@@ -83,7 +83,7 @@ SCHEMA_STATEMENTS = (
 def get_connection(database_path: str | Path = DATABASE_PATH) -> sqlite3.Connection:
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    connection = sqlite3.connect(path, timeout=30)
     connection.execute("PRAGMA foreign_keys = ON")
     connection.row_factory = sqlite3.Row
     return connection
@@ -157,6 +157,41 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_orders_phone_number_order_id "
             "ON orders (phone_number, order_id DESC)",
         ),
+        2: (
+            """CREATE TABLE temple_offerings_new (
+                temple_id INTEGER NOT NULL,
+                offering_id INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                daily_limit INTEGER CHECK (daily_limit IS NULL OR daily_limit >= 0),
+                PRIMARY KEY (temple_id, offering_id),
+                FOREIGN KEY (temple_id) REFERENCES temples(temple_id),
+                FOREIGN KEY (offering_id) REFERENCES offerings(offering_id)
+            )""",
+            """INSERT INTO temple_offerings_new
+               (temple_id, offering_id, active, daily_limit)
+               SELECT temple_id, offering_id, active, daily_limit
+               FROM temple_offerings""",
+            "DROP TRIGGER IF EXISTS trg_order_item_active_temple_offering",
+            "DROP TABLE temple_offerings",
+            "ALTER TABLE temple_offerings_new RENAME TO temple_offerings",
+            """CREATE TRIGGER trg_order_item_active_temple_offering
+            BEFORE INSERT ON order_items
+            WHEN NOT EXISTS (
+                SELECT 1 FROM temple_offerings AS mapping
+                JOIN offerings ON offerings.offering_id = mapping.offering_id
+                WHERE mapping.temple_id = NEW.temple_id
+                  AND mapping.offering_id = NEW.offering_id
+                  AND mapping.active = 1
+                  AND offerings.active = 1
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'offering is not active for this temple');
+            END""",
+            "CREATE INDEX IF NOT EXISTS idx_orders_temple_booking_date_order_id "
+            "ON orders (temple_id, booking_date, order_id)",
+            "CREATE INDEX IF NOT EXISTS idx_order_items_order_offering_quantity "
+            "ON order_items (order_id, offering_id, quantity)",
+        ),
     }
 
     connection.execute(
@@ -167,19 +202,39 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
     )
     for version, statements in migrations.items():
         owns_transaction = not connection.in_transaction
+        rebuilds_mapping_table = version == 2 and owns_transaction
+        if rebuilds_mapping_table:
+            connection.execute("PRAGMA foreign_keys = OFF")
         if owns_transaction:
             connection.execute("BEGIN IMMEDIATE")
-        applied = connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
-        ).fetchone()
-        if applied is None:
-            for statement in statements:
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version) VALUES (?)", (version,)
-            )
-        if owns_transaction:
-            connection.commit()
+        try:
+            applied = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+            ).fetchone()
+            if applied is None:
+                migration_statements = (
+                    statements if owns_transaction or version != 2 else statements[-2:]
+                )
+                for statement in migration_statements:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO schema_migrations (version) VALUES (?)", (version,)
+                )
+            if owns_transaction:
+                connection.commit()
+        except Exception:
+            if owns_transaction:
+                connection.rollback()
+            raise
+        finally:
+            if rebuilds_mapping_table:
+                connection.execute("PRAGMA foreign_keys = ON")
+        if rebuilds_mapping_table:
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(
+                    "Foreign key violations found after temple-offering migration."
+                )
 
 
 def _run_reset_cli() -> None:

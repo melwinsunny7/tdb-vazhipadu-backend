@@ -45,7 +45,7 @@ Results are ordered by descending order ID for deterministic page boundaries. Pa
 
 Create a temple with `POST /temples`, list temples with `GET /temples`, and map a shared offering with `POST /temples/{temple_id}/offerings`. Get a temple's offerings, shared prices, availability, and configured limits with `GET /temples/{temple_id}/offerings`. The offering catalog and its price remain shared across temples.
 
-Each temple-offering mapping has its own active flag and optional `daily_limit`; `null` means unlimited. Set or clear the value with `PATCH /temples/{temple_id}/offerings/{offering_id}` and a body such as `{"daily_limit": 12}` or `{"daily_limit": null}`. P3 daily-limit enforcement is not implemented.
+Each temple-offering mapping has its own active flag and optional `daily_limit`; `null` means unlimited and `0` rejects all positive-quantity bookings. Set or clear the value with `PATCH /temples/{temple_id}/offerings/{offering_id}` and a body such as `{"daily_limit": 12}`, `{"daily_limit": 0}`, or `{"daily_limit": null}`. Capacity counts item quantities for the selected temple and requested booking date. All existing orders consume capacity because cancellation is not implemented. Booking checks and inserts use a SQLite write transaction; transient database contention returns a retryable `503` response. Daily-limit reporting is not implemented.
 
 Order creation requires `temple_id` alongside the existing devotee, date, and item fields. Each offering must be active in the shared catalog and actively mapped to that temple. Order items preserve the shared offering price at booking time.
 

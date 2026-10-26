@@ -39,14 +39,14 @@ class TempleOfferingMappingCreate(BaseModel):
 
     offering_id: int = Field(gt=0)
     active: bool = True
-    daily_limit: int | None = Field(default=None, gt=0)
+    daily_limit: int | None = Field(default=None, ge=0)
 
 
 class TempleOfferingMappingUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     active: bool | None = None
-    daily_limit: int | None = Field(default=None, gt=0)
+    daily_limit: int | None = Field(default=None, ge=0)
 
 
 class TempleOfferingResponse(BaseModel):
