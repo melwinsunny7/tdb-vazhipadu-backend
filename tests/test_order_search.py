@@ -4,7 +4,7 @@ import app.main as main_module
 import app.offerings as offerings_module
 import app.orders as orders_module
 import pytest
-from app.database import get_connection, initialize_database
+from app.database import get_connection, initialize_database, reset_database
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -36,6 +36,14 @@ def search_context(tmp_path, monkeypatch):
 		)
 		assert offering_response.status_code == 201
 		offering_id = offering_response.json()["id"]
+		temple_response = client.post("/temples", json={"name": "Search Temple"})
+		assert temple_response.status_code == 201
+		temple_id = temple_response.json()["id"]
+		mapping_response = client.post(
+			f"/temples/{temple_id}/offerings",
+			json={"offering_id": offering_id, "active": True},
+		)
+		assert mapping_response.status_code == 201
 
 		order_data = [
 			("Mira", "9876543210", "2026-10-20", "BOOKED"),
@@ -50,6 +58,7 @@ def search_context(tmp_path, monkeypatch):
 			response = client.post(
 				"/orders",
 				json={
+					"temple_id": temple_id,
 					"devotee_name": name,
 					"phone_number": phone,
 					"birth_star": "Ashwini",
@@ -171,7 +180,7 @@ def test_invalid_query_parameters_use_standard_error_format(search_context):
 		assert response.json()["error"]["message"]
 
 
-def test_index_migration_preserves_existing_p1_order(tmp_path):
+def test_legacy_database_requires_explicit_reset(tmp_path):
 	database_path = tmp_path / "legacy.db"
 	connection = sqlite3.connect(database_path)
 	try:
@@ -212,29 +221,45 @@ def test_index_migration_preserves_existing_p1_order(tmp_path):
 	finally:
 		connection.close()
 
-	initialize_database(database_path)
-	initialize_database(database_path)
+	with pytest.raises(RuntimeError, match="--reset --confirm-reset"):
+		initialize_database(database_path)
+	connection = sqlite3.connect(database_path)
+	try:
+		assert connection.execute(
+			"SELECT COUNT(*) FROM orders WHERE order_id = 42"
+		).fetchone()[0] == 1
+		connection.execute("CREATE TABLE unrelated_data (value TEXT)")
+		connection.execute("INSERT INTO unrelated_data VALUES ('keep')")
+		connection.commit()
+	finally:
+		connection.close()
+	with pytest.raises(ValueError, match="explicit confirmation"):
+		reset_database(database_path)
+	connection = sqlite3.connect(database_path)
+	try:
+		assert connection.execute(
+			"SELECT COUNT(*) FROM orders WHERE order_id = 42"
+		).fetchone()[0] == 1
+	finally:
+		connection.close()
+	reset_database(database_path, confirm=True)
 
 	connection = get_connection(database_path)
 	try:
-		order = connection.execute(
-			"SELECT order_id, devotee_name, total_paise FROM orders WHERE order_id = 42"
-		).fetchone()
-		assert tuple(order) == (42, "Existing Devotee", 3000)
+		assert connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+		assert connection.execute("SELECT COUNT(*) FROM offerings").fetchone()[0] == 0
 		assert connection.execute(
-			"SELECT COUNT(*) FROM order_items WHERE order_id = 42"
-		).fetchone()[0] == 1
-		assert [
-			row["version"]
-			for row in connection.execute("SELECT version FROM schema_migrations")
-		] == [1]
-		indexes = {
-			row["name"] for row in connection.execute("PRAGMA index_list(orders)")
+			"SELECT COUNT(*) FROM order_items"
+		).fetchone()[0] == 0
+		assert connection.execute(
+			"PRAGMA table_info(orders)"
+		).fetchall()
+		order_columns = {
+			row["name"] for row in connection.execute("PRAGMA table_info(orders)")
 		}
-		assert {
-			"idx_orders_booking_date_order_id",
-			"idx_orders_status_order_id",
-			"idx_orders_phone_number_order_id",
-		}.issubset(indexes)
+		assert "temple_id" in order_columns
+		assert connection.execute(
+			"SELECT value FROM unrelated_data"
+		).fetchone()[0] == "keep"
 	finally:
 		connection.close()

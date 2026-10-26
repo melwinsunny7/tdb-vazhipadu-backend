@@ -9,7 +9,21 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_health_endpoint_returns_ok() -> None:
+def test_health_endpoint_returns_ok(tmp_path, monkeypatch) -> None:
+    database_path = tmp_path / "health.db"
+    monkeypatch.setattr(
+        main_module, "initialize_database", lambda: initialize_database(database_path)
+    )
+    monkeypatch.setattr(
+        offerings_module,
+        "get_connection",
+        lambda: get_connection(database_path),
+    )
+    monkeypatch.setattr(
+        orders_module,
+        "get_connection",
+        lambda: get_connection(database_path),
+    )
     with TestClient(app) as client:
         response = client.get("/health")
 
@@ -34,6 +48,7 @@ def test_order_total_is_calculated_from_offering_prices(tmp_path, monkeypatch) -
     )
 
     with TestClient(app) as client:
+        temple = client.post("/temples", json={"name": "Main Temple"})
         pushpanjali = client.post(
             "/offerings",
             json={"name": "Pushpanjali", "price": "30.00", "active": True},
@@ -44,10 +59,17 @@ def test_order_total_is_calculated_from_offering_prices(tmp_path, monkeypatch) -
         )
         assert pushpanjali.status_code == 201
         assert archana.status_code == 201
+        for offering_response in (pushpanjali, archana):
+            mapping_response = client.post(
+                f"/temples/{temple.json()['id']}/offerings",
+                json={"offering_id": offering_response.json()["id"], "active": True},
+            )
+            assert mapping_response.status_code == 201
 
         response = client.post(
             "/orders",
             json={
+                "temple_id": temple.json()["id"],
                 "devotee_name": "Ananya Menon",
                 "phone_number": "9876543210",
                 "birth_star": "Ashwini",

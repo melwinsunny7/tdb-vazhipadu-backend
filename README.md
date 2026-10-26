@@ -41,6 +41,28 @@ Optional query parameters are `booking_date` (`YYYY-MM-DD`), `status`, `phone_nu
 
 Results are ordered by descending order ID for deterministic page boundaries. Pagination uses SQL `LIMIT` and `OFFSET`; very deep pages can become slower because SQLite must walk past earlier matching rows. Search indexes are installed through a repeatable versioned migration when the application initializes its database.
 
+## Temple-Based Bookings
+
+Create a temple with `POST /temples`, list temples with `GET /temples`, and map a shared offering with `POST /temples/{temple_id}/offerings`. Get a temple's offerings, shared prices, availability, and configured limits with `GET /temples/{temple_id}/offerings`. The offering catalog and its price remain shared across temples.
+
+Each temple-offering mapping has its own active flag and optional `daily_limit`; `null` means unlimited. Set or clear the value with `PATCH /temples/{temple_id}/offerings/{offering_id}` and a body such as `{"daily_limit": 12}` or `{"daily_limit": null}`. P3 daily-limit enforcement is not implemented.
+
+Order creation requires `temple_id` alongside the existing devotee, date, and item fields. Each offering must be active in the shared catalog and actively mapped to that temple. Order items preserve the shared offering price at booking time.
+
+## Explicit Development Database Reset
+
+Ordinary application startup does not delete data. The temple schema is incompatible with the previous order schema, so startup detects an existing legacy database and stops with reset instructions instead of silently discarding records.
+
+The explicit reset deletes and recreates only these application tables and their data: `order_items`, `orders`, `temple_offerings`, `offerings`, `temples`, and `schema_migrations`. Other tables and files are left untouched. Back up any data you need before resetting.
+
+To reset the configured development database (`APP_DATABASE_PATH`, or `data/app.db` by default), run:
+
+```bash
+python -m app.database --reset --confirm-reset
+```
+
+Both flags are required. Tests use temporary database paths and must not run this command against the development database.
+
 ## Test
 
 ```bash

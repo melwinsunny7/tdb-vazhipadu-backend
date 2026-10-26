@@ -80,6 +80,7 @@ def search_orders(
 		orders = [
 			OrderResponse(
 				id=row["order_id"],
+				temple_id=row["temple_id"],
 				devotee_name=row["devotee_name"],
 				phone_number=row["phone_number"],
 				birth_star=row["birth_star"],
@@ -110,20 +111,25 @@ def create_order(order: OrderCreate) -> OrderResponse:
 			total_paise = 0
 			for item in order.items:
 				offering = connection.execute(
-					"SELECT offering_id, name, price_paise, active "
-					"FROM offerings WHERE offering_id = ?",
-					(item.offering_id,),
+					"""SELECT offerings.offering_id, offerings.name,
+					          offerings.price_paise, offerings.active,
+					          temple_offerings.active AS temple_active
+				   FROM offerings
+				   JOIN temple_offerings
+				     ON temple_offerings.offering_id = offerings.offering_id
+				   WHERE offerings.offering_id = ? AND temple_offerings.temple_id = ?""",
+					(item.offering_id, order.temple_id),
 				).fetchone()
 				if offering is None:
 					raise AppError(
-						"INVALID_OFFERING",
-						f"Offering {item.offering_id} does not exist.",
+						"OFFERING_NOT_MAPPED",
+						f"Offering {item.offering_id} is not mapped to this temple.",
 						status_code=422,
 					)
-				if not offering["active"]:
+				if not offering["active"] or not offering["temple_active"]:
 					raise AppError(
 						"INACTIVE_OFFERING",
-						f"Offering {item.offering_id} is inactive.",
+						f"Offering {item.offering_id} is inactive for this temple.",
 						status_code=422,
 					)
 				unit_price_paise = offering["price_paise"]
@@ -132,9 +138,11 @@ def create_order(order: OrderCreate) -> OrderResponse:
 
 			cursor = connection.execute(
 				"""INSERT INTO orders
-				   (devotee_name, phone_number, birth_star, booking_date, status, total_paise)
-				   VALUES (?, ?, ?, ?, 'BOOKED', ?)""",
+				   (temple_id, devotee_name, phone_number, birth_star,
+				    booking_date, status, total_paise)
+				   VALUES (?, ?, ?, ?, ?, 'BOOKED', ?)""",
 				(
+					order.temple_id,
 					order.devotee_name,
 					order.phone_number,
 					order.birth_star,
@@ -147,9 +155,15 @@ def create_order(order: OrderCreate) -> OrderResponse:
 			for item, offering, unit_price_paise in priced_items:
 				connection.execute(
 					"""INSERT INTO order_items
-					   (order_id, offering_id, quantity, unit_price_paise)
-					   VALUES (?, ?, ?, ?)""",
-					(order_id, item.offering_id, item.quantity, unit_price_paise),
+					   (order_id, temple_id, offering_id, quantity, unit_price_paise)
+					   VALUES (?, ?, ?, ?, ?)""",
+					(
+						order_id,
+						order.temple_id,
+						item.offering_id,
+						item.quantity,
+						unit_price_paise,
+					),
 				)
 				response_items.append(
 					OrderItemResponse(
@@ -162,6 +176,7 @@ def create_order(order: OrderCreate) -> OrderResponse:
 
 			return OrderResponse(
 				id=order_id,
+				temple_id=order.temple_id,
 				devotee_name=order.devotee_name,
 				phone_number=order.phone_number,
 				birth_star=order.birth_star,
@@ -195,6 +210,7 @@ def get_order(order_id: int) -> OrderResponse:
 		).fetchall()
 		return OrderResponse(
 			id=order["order_id"],
+			temple_id=order["temple_id"],
 			devotee_name=order["devotee_name"],
 			phone_number=order["phone_number"],
 			birth_star=order["birth_star"],
