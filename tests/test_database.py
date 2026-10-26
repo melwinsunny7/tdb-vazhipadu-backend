@@ -10,7 +10,7 @@ def test_initialize_database_creates_directory_and_database(tmp_path) -> None:
 
     connection = get_connection(database_path)
     try:
-        assert connection.execute("SELECT 1").fetchone() == (1,)
-        assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         connection.close()
