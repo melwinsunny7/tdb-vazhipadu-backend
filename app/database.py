@@ -55,5 +55,39 @@ def initialize_database(database_path: str | Path = DATABASE_PATH) -> None:
                 );
                 """
             )
+        _apply_migrations(connection)
     finally:
         connection.close()
+
+
+def _apply_migrations(connection: sqlite3.Connection) -> None:
+    migrations = {
+        1: (
+            "CREATE INDEX IF NOT EXISTS idx_orders_booking_date_order_id "
+            "ON orders (booking_date, order_id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_status_order_id "
+            "ON orders (status, order_id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_phone_number_order_id "
+            "ON orders (phone_number, order_id DESC)",
+        ),
+    }
+
+    with connection:
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS schema_migrations (
+                   version INTEGER PRIMARY KEY,
+                   applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+               )"""
+        )
+        applied_versions = {
+            row["version"]
+            for row in connection.execute("SELECT version FROM schema_migrations")
+        }
+        for version, statements in migrations.items():
+            if version in applied_versions:
+                continue
+            for statement in statements:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)", (version,)
+            )

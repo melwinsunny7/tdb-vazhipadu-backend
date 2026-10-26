@@ -56,3 +56,11 @@ class OrderResponse(BaseModel):
     status: str
     items: list[OrderItemResponse]
     total: Decimal
+
+
+class OrderSearchResponse(BaseModel):
+    orders: list[OrderResponse]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
