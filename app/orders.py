@@ -1,13 +1,104 @@
 from decimal import Decimal
+from datetime import date
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.database import get_connection
 from app.errors import AppError
-from app.schemas import OrderCreate, OrderItemResponse, OrderResponse
+from app.schemas import (
+	OrderCreate,
+	OrderItemResponse,
+	OrderResponse,
+	OrderSearchResponse,
+)
 
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get("", response_model=OrderSearchResponse)
+def search_orders(
+	booking_date: date | None = None,
+	status: str | None = Query(default=None, min_length=1, max_length=30),
+	phone_number: str | None = Query(
+		default=None, pattern=r"^\+?[0-9]{7,15}$"
+	),
+	page: int = Query(default=1, ge=1),
+	page_size: int = Query(default=20, ge=1, le=100),
+) -> OrderSearchResponse:
+	filters = []
+	parameters = []
+	if booking_date is not None:
+		filters.append("booking_date = ?")
+		parameters.append(booking_date.isoformat())
+	if status is not None:
+		filters.append("status = ?")
+		parameters.append(status)
+	if phone_number is not None:
+		filters.append("phone_number = ?")
+		parameters.append(phone_number)
+
+	where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+	connection = get_connection()
+	try:
+		total = connection.execute(
+			f"SELECT COUNT(*) FROM orders {where_clause}", parameters
+		).fetchone()[0]
+		offset = (page - 1) * page_size
+		order_rows = connection.execute(
+			f"SELECT * FROM orders {where_clause} "
+			"ORDER BY order_id DESC LIMIT ? OFFSET ?",
+			[*parameters, page_size, offset],
+		).fetchall()
+
+		items_by_order: dict[int, list[OrderItemResponse]] = {
+			row["order_id"]: [] for row in order_rows
+		}
+		if items_by_order:
+			placeholders = ", ".join("?" for _ in items_by_order)
+			item_rows = connection.execute(
+				"""SELECT order_items.order_id, order_items.offering_id,
+				          offerings.name, order_items.quantity,
+				          order_items.unit_price_paise
+			   FROM order_items
+			   JOIN offerings ON offerings.offering_id = order_items.offering_id
+			   WHERE order_items.order_id IN ("""
+				+ placeholders
+				+ ") ORDER BY order_items.order_id, order_items.order_item_id",
+				list(items_by_order),
+			).fetchall()
+			for row in item_rows:
+				items_by_order[row["order_id"]].append(
+					OrderItemResponse(
+						offering_id=row["offering_id"],
+						offering_name=row["name"],
+						quantity=row["quantity"],
+						unit_price=Decimal(row["unit_price_paise"]) / 100,
+					)
+				)
+
+		orders = [
+			OrderResponse(
+				id=row["order_id"],
+				devotee_name=row["devotee_name"],
+				phone_number=row["phone_number"],
+				birth_star=row["birth_star"],
+				booking_date=row["booking_date"],
+				status=row["status"],
+				items=items_by_order[row["order_id"]],
+				total=Decimal(row["total_paise"]) / 100,
+			)
+			for row in order_rows
+		]
+		return OrderSearchResponse(
+			orders=orders,
+			page=page,
+			page_size=page_size,
+			total=total,
+			total_pages=(total + page_size - 1) // page_size,
+		)
+	finally:
+		connection.close()
 
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
